@@ -6,6 +6,7 @@ import logging
 import sys
 import traceback
 import random
+import time
 
 logging.basicConfig(level=logging.INFO)
 
@@ -72,15 +73,16 @@ async def on_error(event, *args, **kwargs):
     error_type, error_value, error_traceback = sys.exc_info()
     error_traceback = ''.join(traceback.format_exception(error_type, error_value, error_traceback))
     try:
-        await channel.send(f'An error occurred in {event}: {error_traceback}')
+        await channel.send("There was an error. Please have RocketGod check my health when he gets a chance, I'll be back.")
     except Exception as e:
         logging.error(f"Failed to send error to Discord channel: {str(e)}")
 
-@tasks.loop(hours=2)
+    print(f"An error occurred in {event}: {error_traceback}")
+
+@tasks.loop(hours=8)
 async def leaderboard_message():
-    await bot.wait_until_ready()  
-    await asyncio.sleep(60 * 5)  # wait an additional 5 minutes before starting - change if you want
- 
+    await bot.wait_until_ready() 
+
     try:
         # Get the current leaderboard
         leaderboard = await get_leaderboard()
@@ -208,9 +210,6 @@ async def on_ready():
             message += f"\n\n👀 Look out {leader[1]}, {runner_up[1]} is right behind you! Better step up your game!"
         
         await channel.send(message)  # Send the congratulatory message after the leaderboard
-
-    # Start the leaderboard_message loop
-    leaderboard_message.start()
 
 @bot.command()
 async def leaderboard(ctx):
