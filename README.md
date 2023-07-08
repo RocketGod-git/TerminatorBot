@@ -6,4 +6,4 @@ Python Discord bot with Terminator 2 theme.<br>
 <br>
 RocketGod
 
-![RocketGod Logo](https://user-images.githubusercontent.com/57732082/213221533-171b37da-46e5-4661-ac47-c7f23d24b816.png)
+![RocketGod](https://github.com/RocketGod-git/t2-discord-ban-leaderboard/assets/57732082/451134e6-b07b-4267-8329-c8fb7bd2b741)
