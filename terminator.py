@@ -1,19 +1,33 @@
 import discord
 from discord.ext import commands, tasks
-import asyncio
 import aiosqlite
 import logging
 import sys
 import traceback
 import random
-import time
+import json
+from pathlib import Path
 
-logging.basicConfig(level=logging.INFO)
+# Setup logging
+logging.basicConfig(level=logging.INFO, handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()])
 
-# Variables
-TOKEN = "Put your Discord Bot token here in the quotes"
-LEADERBOARD_CHANNEL_ID = put your channel ID here where the leaderboard will show without quotes
-MOD_ROLE_ID = put the ID of the role assigned to you mods here without quotes
+# Load the config file
+config_path = Path('config.json')
+if not config_path.exists():
+    logging.error("Config file not found. Exiting...")
+    sys.exit()
+
+try:
+    with open(config_path, 'r') as f:
+        config = json.load(f)
+except json.JSONDecodeError:
+    logging.error("Could not parse the config file. Please ensure it is valid JSON. Exiting...")
+    sys.exit()
+
+# config is the dict loaded from config.json
+TOKEN = config.get("TOKEN")
+LEADERBOARD_CHANNEL_ID = int(config.get("LEADERBOARD_CHANNEL_ID"))
+MOD_ROLE_ID = int(config.get("MOD_ROLE_ID"))
 
 CONGRATULATIONS_PHRASES = [
     "Great job! Remember, hasta la vista, baby!",
@@ -39,7 +53,7 @@ CONGRATULATIONS_PHRASES = [
 ]
 
 intents = discord.Intents.all()
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix="!", intents=intents, reconnect=True)
 
 async def setup():
     try:
@@ -48,36 +62,25 @@ async def setup():
             await cursor.execute("CREATE TABLE IF NOT EXISTS leaderboard (mod_id INT, mod_name TEXT, ban_count INT, UNIQUE(mod_id))")
             await cursor.execute("CREATE TABLE IF NOT EXISTS ban_details (mod_id INT, user_id INT)")
             await db.commit()
+        logging.info("Database setup completed successfully")
     except Exception as e:
         logging.error(f"Error in setup: {str(e)}")
 
 @bot.event
 async def on_command_error(ctx, error):
-    """The event triggered when an error is raised while invoking a command.
-    ctx   : Context
-    error : Exception"""
     if isinstance(error, commands.CommandNotFound):
         return
-    channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
     try:
+        channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
         await channel.send(f'An error occurred: {str(error)}')
     except Exception as e:
         logging.error(f"Failed to send error to Discord channel: {str(e)}")
 
 @bot.event
 async def on_error(event, *args, **kwargs):
-    """The event triggered when an error is raised in any event.
-    event : str - The name of the event.
-    *args, **kwargs : The parameters of the event."""
-    channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
     error_type, error_value, error_traceback = sys.exc_info()
     error_traceback = ''.join(traceback.format_exception(error_type, error_value, error_traceback))
-    try:
-        await channel.send("There was an error. Please have RocketGod check my health when he gets a chance, I'll be back.")
-    except Exception as e:
-        logging.error(f"Failed to send error to Discord channel: {str(e)}")
-
-    print(f"An error occurred in {event}: {error_traceback}")
+    logging.error(f"An error occurred in {event}: {error_traceback}")
 
 @tasks.loop(hours=8)
 async def leaderboard_message():
@@ -105,29 +108,29 @@ async def leaderboard_message():
 
         # Send the message to the leaderboard channel
         channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
+        logging.info("Sending message to leaderboard channel...")
         await channel.send(message)
+        logging.info("Message sent to leaderboard channel")
     except Exception as e:
         logging.error(f"Error in leaderboard_message: {str(e)}")
 
 async def update_ban_count(mod_id: int, mod_name: str, user_id: int):
-    try:
-        async with aiosqlite.connect("leaderboard.db") as db:
-            cursor = await db.cursor()
-            
+    async with aiosqlite.connect("leaderboard.db") as db:
+        cursor = await db.cursor()
+        try:
             await cursor.execute("SELECT mod_id FROM leaderboard WHERE mod_id = ?", (mod_id,))
             data = await cursor.fetchone()
-            
             if data:
-                # mod_id already exists, increment ban_count
                 await cursor.execute("UPDATE leaderboard SET ban_count = ban_count + 1, mod_name = ? WHERE mod_id = ?", (mod_name, mod_id))
             else:
-                # mod_id does not exist, insert new row with ban_count as 1
                 await cursor.execute("INSERT INTO leaderboard (mod_id, mod_name, ban_count) VALUES (?, ?, ?)", (mod_id, mod_name, 1))
-                
             await cursor.execute("INSERT INTO ban_details (mod_id, user_id) VALUES (?, ?)", (mod_id, user_id))
+        except Exception as e:
+            logging.error(f"Error in updating ban count: {str(e)}")
+            await db.rollback()
+        else:
             await db.commit()
-    except Exception as e:
-        logging.error(f"Error in updating ban count: {str(e)}")
+            logging.info(f"Updated ban count for mod {mod_id}")
 
 @bot.event
 async def on_member_ban(guild, user):
@@ -155,25 +158,28 @@ async def on_member_ban(guild, user):
         logging.error(f"Error in handling member ban: {str(e)}")
 
 async def get_leaderboard():
-    try:
-        async with aiosqlite.connect("leaderboard.db") as db:
-            cursor = await db.cursor()
+    async with aiosqlite.connect("leaderboard.db") as db:
+        cursor = await db.cursor()
+        try:
             await cursor.execute("SELECT * FROM leaderboard ORDER BY ban_count DESC LIMIT 10")
             return await cursor.fetchall()
-    except Exception as e:
-        logging.error(f"Error in getting leaderboard: {str(e)}")
+        except Exception as e:
+            logging.error(f"Error in getting leaderboard: {str(e)}")
+            return []
 
 async def get_ban_details(mod_id: int):
     try:
         async with aiosqlite.connect("leaderboard.db") as db:
             cursor = await db.cursor()
             await cursor.execute("SELECT user_id FROM ban_details WHERE mod_id = ?", (mod_id,))
+            logging.info("Fetched leaderboard from database")
             return await cursor.fetchall()
     except Exception as e:
         logging.error(f"Error in getting ban details: {str(e)}")
 
 @bot.event
 async def on_ready():
+    logging.info("Bot is starting up...")
     print(f"We have logged in as {bot.user}")
     print("Setting up database tables...")
     await setup()
@@ -211,6 +217,9 @@ async def on_ready():
         
         await channel.send(message)  # Send the congratulatory message after the leaderboard
 
+    # Start the leaderboard_message task
+    leaderboard_message.start()
+
 @bot.command()
 async def leaderboard(ctx):
     try:
@@ -236,7 +245,6 @@ async def kills(ctx, *, user: discord.User = None):
         if user is None:
             await ctx.send("You need to specify a mod's username! Try !kills [username].")
             return
-
         mod_id = user.id
         ban_details = await get_ban_details(mod_id)
 
@@ -263,11 +271,4 @@ async def kills(ctx, *, user: discord.User = None):
     except Exception as e:
         logging.error(f"Error in kills command: {str(e)}")
 
-while True:
-    try:
-        bot.run(TOKEN)
-    except Exception as e:
-        error = traceback.format_exception(type(e), e, e.__traceback__)
-        error = "".join(error)
-        logging.error(f'Bot crashed due to error: {error}. Restarting in 5 seconds...')
-        time.sleep(5)
+bot.run(TOKEN)
