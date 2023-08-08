@@ -7,6 +7,9 @@ import traceback
 import random
 import json
 from pathlib import Path
+import signal
+import asyncio
+
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, handlers=[logging.FileHandler("bot.log"), logging.StreamHandler()])
@@ -57,11 +60,9 @@ bot = commands.Bot(command_prefix="!", intents=intents, reconnect=True)
 
 async def setup():
     try:
-        async with aiosqlite.connect("leaderboard.db") as db:
-            cursor = await db.cursor()
-            await cursor.execute("CREATE TABLE IF NOT EXISTS leaderboard (mod_id INT, mod_name TEXT, ban_count INT, UNIQUE(mod_id))")
-            await cursor.execute("CREATE TABLE IF NOT EXISTS ban_details (mod_id INT, user_id INT)")
-            await db.commit()
+        await bot.cursor.execute("CREATE TABLE IF NOT EXISTS leaderboard (mod_id INT, mod_name TEXT, ban_count INT, UNIQUE(mod_id))")
+        await bot.cursor.execute("CREATE TABLE IF NOT EXISTS ban_details (mod_id INT, user_id INT)")
+        await bot.db.commit()
         logging.info("Database setup completed successfully")
     except Exception as e:
         logging.error(f"Error in setup: {str(e)}")
@@ -82,37 +83,15 @@ async def on_error(event, *args, **kwargs):
     error_traceback = ''.join(traceback.format_exception(error_type, error_value, error_traceback))
     logging.error(f"An error occurred in {event}: {error_traceback}")
 
-@tasks.loop(hours=8)
-async def leaderboard_message():
-    await bot.wait_until_ready() 
+def signal_handler():
+    logging.info("Received exit signal. Shutting down...")
+    bot.loop.run_until_complete(on_disconnect())
+    bot.loop.stop()
+    sys.exit(0)
 
-    try:
-        # Get the current leaderboard
-        leaderboard = await get_leaderboard()
-
-        # If the leaderboard is empty, there's nothing to do
-        if not leaderboard:
-            return
-
-        # Get the first and second places
-        leader = leaderboard[0]
-        runner_up = leaderboard[1] if len(leaderboard) > 1 else None
-
-        # Generate a random congratulation message
-        congrats_message = random.choice(CONGRATULATIONS_PHRASES)
-
-        # Generate the message
-        message = f"🎉 Congratulations {leader[1]}! 🎉\n{congrats_message}"
-        if runner_up:
-            message += f"\n\n👀 Look out {leader[1]}, {runner_up[1]} is right behind you! Better step up your game!"
-
-        # Send the message to the leaderboard channel
-        channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
-        logging.info("Sending message to leaderboard channel...")
-        await channel.send(message)
-        logging.info("Message sent to leaderboard channel")
-    except Exception as e:
-        logging.error(f"Error in leaderboard_message: {str(e)}")
+# Register the signal handlers
+signal.signal(signal.SIGINT, lambda x, y: signal_handler())
+signal.signal(signal.SIGTERM, lambda x, y: signal_handler())
 
 async def update_ban_count(mod_id: int, mod_name: str, user_id: int):
     async with aiosqlite.connect("leaderboard.db") as db:
@@ -134,6 +113,7 @@ async def update_ban_count(mod_id: int, mod_name: str, user_id: int):
 
 @bot.event
 async def on_member_ban(guild, user):
+    logging.info(f"Detected a ban event for user {user.name}. Processing...")
     try:
         async for entry in guild.audit_logs(limit=1, action=discord.AuditLogAction.ban):
             if entry.target.id == user.id and any([role.id == MOD_ROLE_ID for role in entry.user.roles]):
@@ -158,14 +138,12 @@ async def on_member_ban(guild, user):
         logging.error(f"Error in handling member ban: {str(e)}")
 
 async def get_leaderboard():
-    async with aiosqlite.connect("leaderboard.db") as db:
-        cursor = await db.cursor()
-        try:
-            await cursor.execute("SELECT * FROM leaderboard ORDER BY ban_count DESC LIMIT 10")
-            return await cursor.fetchall()
-        except Exception as e:
-            logging.error(f"Error in getting leaderboard: {str(e)}")
-            return []
+    try:
+        await bot.cursor.execute("SELECT * FROM leaderboard ORDER BY ban_count DESC LIMIT 10")
+        return await bot.cursor.fetchall()
+    except Exception as e:
+        logging.error(f"Error in getting leaderboard: {str(e)}")
+        return []
 
 async def get_ban_details(mod_id: int):
     try:
@@ -181,12 +159,19 @@ async def get_ban_details(mod_id: int):
 async def on_ready():
     logging.info("Bot is starting up...")
     print(f"We have logged in as {bot.user}")
+
+    # Establish a persistent database connection
+    logging.info("Connecting to the database...")
+    bot.db = await aiosqlite.connect("leaderboard.db")
+    bot.cursor = await bot.db.cursor()
+
     print("Setting up database tables...")
     await setup()
     print("Setup done!")
 
+    logging.info("Bot is now waiting for events or commands...")
     channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
-    
+
     # Show the leaderboard on startup
     leaderboard = await get_leaderboard()
 
@@ -217,11 +202,9 @@ async def on_ready():
         
         await channel.send(message)  # Send the congratulatory message after the leaderboard
 
-    # Start the leaderboard_message task
-    leaderboard_message.start()
-
 @bot.command()
 async def leaderboard(ctx):
+    logging.info("Processing leaderboard command...")
     try:
         leaderboard = await get_leaderboard()
 
@@ -241,6 +224,7 @@ async def leaderboard(ctx):
 
 @bot.command()
 async def kills(ctx, *, user: discord.User = None):
+    logging.info(f"Processing kills command for user {user.name if user else 'None'}...")
     try:
         if user is None:
             await ctx.send("You need to specify a mod's username! Try !kills [username].")
@@ -271,4 +255,27 @@ async def kills(ctx, *, user: discord.User = None):
     except Exception as e:
         logging.error(f"Error in kills command: {str(e)}")
 
-bot.run(TOKEN)
+@bot.event
+async def on_disconnect():
+    if hasattr(bot, 'cursor'):
+        await bot.cursor.close()
+    if hasattr(bot, 'db'):
+        await bot.db.close()
+
+if __name__ == "__main__":
+    def signal_handler():
+        logging.info("Received exit signal. Shutting down...")
+        bot.loop.run_until_complete(on_disconnect())
+        bot.loop.stop()
+        sys.exit(0)
+
+    # Register the signal handlers
+    signal.signal(signal.SIGINT, lambda x, y: signal_handler())
+    signal.signal(signal.SIGTERM, lambda x, y: signal_handler())
+
+    try:
+        bot.run(TOKEN)
+    except Exception as e:
+        logging.error(f"Unexpected error: {str(e)}")
+        bot.loop.run_until_complete(on_disconnect())
+        sys.exit(1)  # Exit with a non-zero code to indicate an error
