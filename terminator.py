@@ -32,28 +32,19 @@ TOKEN = config.get("TOKEN")
 LEADERBOARD_CHANNEL_ID = int(config.get("LEADERBOARD_CHANNEL_ID"))
 MOD_ROLE_ID = int(config.get("MOD_ROLE_ID"))
 
-CONGRATULATIONS_PHRASES = [
-    "Great job! Remember, hasta la vista, baby!",
-    "Outstanding focus! Remember, the future's not set. There's no fate but what we make for ourselves.",
-    "Fantastic job, you're as unstoppable as a T-800! Keep on rolling.",
-    "You're terminating tasks left and right! Good work! Come with me if you want to live.",
-    "You're on fire! Skynet would be envious of your efficiency.",
-    "Impressive performance, keep going! By the way, I need your clothes, your boots, and your motorcycle.",
-    "You're leading the way! Trust me, this is just the beginning.",
-    "Outstanding, you're matching my efficiency. No problemo.",
-    "You're on a roll! Don't stop now. I'll be back... to see you at the top.",
-    "Superb job, keep it up! You're giving the Terminators a run for their money.",
-    "Keep it up! Remember, you're more than just a machine. You have a heart, unlike a Terminator.",
-    "Brilliant work! Seems like you have detailed files on how to succeed.",
-    "Exceptional! Your CPU must be a neural net processor; a learning computer.",
-    "Excellent! Don't worry, you're far more advanced than any old Terminator.",
-    "Keep moving forward! Skynet can't hold a candle to you.",
-    "Fantastic job! The more contact you have with tasks, the more you learn. Keep going!",
-    "Impressive! Remember, your future is not set. There's no fate but what you make for yourself.",
-    "Great job! You're relentless. The T-1000 would have been left in the dust.",
-    "Nice work! And remember, obstacles are just like your foster parents... they can be overcome.",
-    "Awesome job! If you were a T-1000, you'd be the one leading the pack. Keep it up!"
-]
+phrases_path = Path('phrases.json')
+if not phrases_path.exists():
+    logging.error("Phrases file not found. Exiting...")
+    sys.exit()
+
+try:
+    with open(phrases_path, 'r') as f:
+        phrases = json.load(f)
+except json.JSONDecodeError:
+    logging.error("Could not parse the phrases file. Please ensure it is valid JSON. Exiting...")
+    sys.exit()
+
+CONGRATULATIONS_PHRASES = phrases.get("congratulations_phrases")
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents, reconnect=True)
@@ -89,27 +80,34 @@ def signal_handler():
     bot.loop.stop()
     sys.exit(0)
 
-# Register the signal handlers
-signal.signal(signal.SIGINT, lambda x, y: signal_handler())
-signal.signal(signal.SIGTERM, lambda x, y: signal_handler())
+async def execute_db_query(query, parameters=()):
+    try:
+        await bot.cursor.execute(query, parameters)
+        await bot.db.commit()
+    except Exception as e:
+        logging.error(f"Database error: {str(e)}")
+        await bot.db.rollback()
+
+async def update_leaderboard(mod_id, mod_name):
+    await execute_db_query("UPDATE leaderboard SET ban_count = ban_count + 1, mod_name = ? WHERE mod_id = ?", (mod_name, mod_id))
+
+async def insert_into_leaderboard(mod_id, mod_name):
+    await execute_db_query("INSERT INTO leaderboard (mod_id, mod_name, ban_count) VALUES (?, ?, ?)", (mod_id, mod_name, 1))
+
+async def insert_into_ban_details(mod_id, user_id):
+    await execute_db_query("INSERT INTO ban_details (mod_id, user_id) VALUES (?, ?)", (mod_id, user_id))
 
 async def update_ban_count(mod_id: int, mod_name: str, user_id: int):
-    async with aiosqlite.connect("leaderboard.db") as db:
-        cursor = await db.cursor()
-        try:
-            await cursor.execute("SELECT mod_id FROM leaderboard WHERE mod_id = ?", (mod_id,))
-            data = await cursor.fetchone()
-            if data:
-                await cursor.execute("UPDATE leaderboard SET ban_count = ban_count + 1, mod_name = ? WHERE mod_id = ?", (mod_name, mod_id))
-            else:
-                await cursor.execute("INSERT INTO leaderboard (mod_id, mod_name, ban_count) VALUES (?, ?, ?)", (mod_id, mod_name, 1))
-            await cursor.execute("INSERT INTO ban_details (mod_id, user_id) VALUES (?, ?)", (mod_id, user_id))
-        except Exception as e:
-            logging.error(f"Error in updating ban count: {str(e)}")
-            await db.rollback()
+    try:
+        await bot.cursor.execute("SELECT mod_id FROM leaderboard WHERE mod_id = ?", (mod_id,))
+        data = await bot.cursor.fetchone()
+        if data:
+            await update_leaderboard(mod_id, mod_name)
         else:
-            await db.commit()
-            logging.info(f"Updated ban count for mod {mod_id}")
+            await insert_into_leaderboard(mod_id, mod_name)
+        await insert_into_ban_details(mod_id, user_id)
+    except Exception as e:
+        logging.error(f"Error in updating ban count: {str(e)}")
 
 @bot.event
 async def on_member_ban(guild, user):
@@ -147,11 +145,9 @@ async def get_leaderboard():
 
 async def get_ban_details(mod_id: int):
     try:
-        async with aiosqlite.connect("leaderboard.db") as db:
-            cursor = await db.cursor()
-            await cursor.execute("SELECT user_id FROM ban_details WHERE mod_id = ?", (mod_id,))
-            logging.info("Fetched leaderboard from database")
-            return await cursor.fetchall()
+        await bot.cursor.execute("SELECT user_id FROM ban_details WHERE mod_id = ?", (mod_id,))
+        logging.info("Fetched leaderboard from database")
+        return await bot.cursor.fetchall()
     except Exception as e:
         logging.error(f"Error in getting ban details: {str(e)}")
 
@@ -161,7 +157,6 @@ async def on_ready():
     print(f"We have logged in as {bot.user}")
 
     # Establish a persistent database connection
-    logging.info("Connecting to the database...")
     bot.db = await aiosqlite.connect("leaderboard.db")
     bot.cursor = await bot.db.cursor()
 
@@ -257,10 +252,17 @@ async def kills(ctx, *, user: discord.User = None):
 
 @bot.event
 async def on_disconnect():
-    if hasattr(bot, 'cursor'):
-        await bot.cursor.close()
-    if hasattr(bot, 'db'):
-        await bot.db.close()
+    try:
+        if hasattr(bot, 'cursor') and bot.cursor:
+            await bot.cursor.close()
+    except ValueError as e:
+        logging.warning("Cursor was already closed.")
+
+    try:
+        if hasattr(bot, 'db') and bot.db:
+            await bot.db.close()
+    except ValueError as e:
+        logging.warning("Database connection was already closed.")
 
 if __name__ == "__main__":
     def signal_handler():
